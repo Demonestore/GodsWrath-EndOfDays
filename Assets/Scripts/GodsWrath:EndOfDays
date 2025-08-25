@@ -1,436 +1,316 @@
-// ArcadeCore.cs
-// Single-file, 2.5D arcade-style core: movement, combat, skills & your custom Goro/God skills.
-// NOTE: Uses placeholder VFX/SFX hooks so you can ship now and swap real assets later.
+// File: Assets/Scripts/GodsWrathHUD.cs
+// Minimal mobile-friendly HUD that pairs with GodsWrathCore.cs.
+// - Creates Canvas + Buttons at runtime
+// - Lets you pick God or Goro (owner only) and cast skills
+// - Spawns test targets so you can see damage/freeze/prayer drain
+// Requires: UnityEngine.UI (UGUI)
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
-namespace GodsWrath
+public class GodsWrathHUD : MonoBehaviour
 {
-    // -----------------------------
-    // BOOTSTRAP & SIMPLE SINGLETONS
-    // -----------------------------
-    public class ArcadeGameBootstrap : MonoBehaviour
+    GodsWrathCore C => GodsWrathCore.I;
+
+    // UI
+    Canvas canvas;
+    RectTransform root;
+    Text statusText;
+    Text logText;
+    RectTransform skillGrid;
+
+    GodsWrathCore.Unit selected;
+    List<GodsWrathCore.Unit> dummies = new List<GodsWrathCore.Unit>();
+
+    void Awake()
     {
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-        static void Init()
+        // Ensure EventSystem
+        if (FindObjectOfType<EventSystem>() == null)
         {
-            if (FindObjectOfType<ArcadeGameBootstrap>() == null)
-            {
-                var go = new GameObject("ArcadeBootstrap");
-                go.AddComponent<ArcadeGameBootstrap>();
-                DontDestroyOnLoad(go);
-            }
+            var es = new GameObject("EventSystem", typeof(EventSystem), typeof(StandaloneInputModule));
+            DontDestroyOnLoad(es);
         }
 
-        void Awake()
+        BuildCanvas();
+    }
+
+    void Start()
+    {
+        if (C == null)
         {
-            QualitySettings.vSyncCount = 0;
-            Application.targetFrameRate = 60;
+            Debug.LogError("GodsWrathCore not found in scene. Add GodsWrathCore.cs to an object first.");
+            return;
+        }
+
+        // If owner units aren’t spawned yet, spawn them (for quick test)
+        if (!C.units.Any(u => u.faction == GodsWrathCore.Faction.God || u.faction == GodsWrathCore.Faction.Goro))
+        {
+            var method = typeof(GodsWrathCore).GetMethod("DebugSpawnOwnerGodAndGoro", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            method?.Invoke(C, null);
+        }
+
+        // Select God by default (if owner), else first player unit
+        selected = C.units.FirstOrDefault(u => u.faction == GodsWrathCore.Faction.God && C.IsOwner(u.accountId))
+                ?? C.units.FirstOrDefault(u => u.isPlayerControlled)
+                ?? C.units.FirstOrDefault();
+
+        SpawnTestTargets();
+
+        BuildTopBar();
+        RebuildSkillButtons();
+        C.OnLog += AppendLog;
+        AppendLog("HUD ready.");
+    }
+
+    void Update()
+    {
+        if (selected != null)
+        {
+            statusText.text = $"{selected.name}  HP {Mathf.CeilToInt(selected.stats.hp)}/{Mathf.CeilToInt(selected.stats.maxHp)}  " +
+                              $"Prayer {selected.stats.prayerPoints}  Rage {Mathf.RoundToInt(selected.stats.rage)}  " +
+                              $"Move {selected.stats.baseMoveSpeed:0.0}  Hand x{selected.stats.handSpeedMult:0.00}";
         }
     }
 
-    public static class Balance
+    // ---------- Build UI ----------
+    void BuildCanvas()
     {
-        // Global tunables
-        public const int MaxTargetsIceBarrage = 9;
-        public const int MaxTargetsShadowBarrage = 9;
-        public const int MaxTargetsTornado = 11;
+        var goCanvas = new GameObject("HUD_Canvas");
+        DontDestroyOnLoad(goCanvas);
+        canvas = goCanvas.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        goCanvas.AddComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        goCanvas.AddComponent<GraphicRaycaster>();
 
-        // Durations
-        public const float IceBarrageFreezeSec = 15f;   // Your spec
-        public const float TornadoDurSec = 5f;          // Your spec
+        root = new GameObject("Root", typeof(RectTransform)).GetComponent<RectTransform>();
+        root.SetParent(canvas.transform, false);
+        root.anchorMin = Vector2.zero; root.anchorMax = Vector2.one;
+        root.offsetMin = Vector2.zero; root.offsetMax = Vector2.zero;
 
-        // Boosts (non-stacking unless stated)
-        public const float IceBarrage_IceDamageBoost = 0.30f;   // +30% ice
-        public const float IceBarrage_MagicBoost   = 0.15f;     // +15% magic
+        // Background (subtle)
+        var bg = new GameObject("BG").AddComponent<Image>();
+        bg.color = new Color(0,0,0,0.25f);
+        var bgrt = bg.GetComponent<RectTransform>();
+        bgrt.SetParent(root, false);
+        bgrt.anchorMin = Vector2.zero; bgrt.anchorMax = Vector2.one;
+        bgrt.offsetMin = Vector2.zero; bgrt.offsetMax = Vector2.zero;
 
-        public const float ShadowBarrage_MagicBoost = 0.30f;    // +30% magic
-        public const float FireFromHeaven_FireBoost = 0.50f;    // 50% fire dmg (applied in effect)
+        // Status text (top)
+        statusText = NewText("Status", root, 18, TextAnchor.UpperLeft);
+        var stRT = statusText.rectTransform;
+        stRT.anchorMin = new Vector2(0,1); stRT.anchorMax = new Vector2(1,1);
+        stRT.pivot = new Vector2(0,1);
+        stRT.offsetMin = new Vector2(10, -40); stRT.offsetMax = new Vector2(-10, -10);
+        statusText.text = "Status...";
 
-        // Debuffs (examples used by skills)
-        public const int ShadowBarrage_MaxPrayerDrainStacks = 3;
-        public const int ShadowBarrage_MaxHealthDebuffStacks = 3;
+        // Log (left)
+        logText = NewText("Log", root, 14, TextAnchor.LowerLeft);
+        var logRT = logText.rectTransform;
+        logRT.anchorMin = new Vector2(0,0); logRT.anchorMax = new Vector2(0.6f,0.35f);
+        logRT.offsetMin = new Vector2(10,10); logRT.offsetMax = new Vector2(-10,-10);
+        logText.text = "Console:\n";
 
-        // God-only caps
-        public const float Tornado_MagicBoost = 0.50f;          // Non-stackable, God-only
+        // Skill buttons panel (right/bottom)
+        var gridGO = new GameObject("SkillGrid", typeof(Image));
+        skillGrid = gridGO.GetComponent<RectTransform>();
+        skillGrid.SetParent(root, false);
+        skillGrid.anchorMin = new Vector2(0.62f, 0.0f);
+        skillGrid.anchorMax = new Vector2(1f, 0.55f);
+        skillGrid.offsetMin = new Vector2(10, 10);
+        skillGrid.offsetMax = new Vector2(-10, -10);
+        gridGO.GetComponent<Image>().color = new Color(0,0,0,0.35f);
+        var gridLayout = gridGO.AddComponent<GridLayoutGroup>();
+        gridLayout.cellSize = new Vector2(220, 90);
+        gridLayout.spacing = new Vector2(10,10);
+        gridLayout.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+        gridLayout.constraintCount = 2;
     }
 
-    // -----------------------------
-    // BASIC COMBAT MODEL
-    // -----------------------------
-    public enum Faction { Player, Enemy, Boss, God, Goro }
-    public enum DamageSchool { Physical, Ice, Shadow, Fire, Wind, Lightning, Divine }
-    public enum SkillId
+    void BuildTopBar()
     {
-        None,
+        // Unit switcher buttons (God/Goro if present)
+        var bar = new GameObject("TopBar", typeof(RectTransform)).GetComponent<RectTransform>();
+        bar.SetParent(root, false);
+        bar.anchorMin = new Vector2(0.0f, 0.55f);
+        bar.anchorMax = new Vector2(0.60f, 0.60f);
+        bar.offsetMin = new Vector2(10, 0);
+        bar.offsetMax = new Vector2(-10, 0);
 
-        // Goro-only actives
-        IceBarrage,       // AOE hard-freeze, +30% ice, +15% magic, 15s
-        ShadowBarrage,    // Multi-shadow projectiles, +30% magic, drains prayer, health debuff
+        // Find owner God/Goro
+        var god = C.units.FirstOrDefault(u => u.faction == GodsWrathCore.Faction.God && C.IsOwner(u.accountId));
+        var goro = C.units.FirstOrDefault(u => u.faction == GodsWrathCore.Faction.Goro && C.IsOwner(u.accountId));
 
-        // God-only actives
-        FireFromHeaven,   // 50% fire dmg, huge AOEr, 2 debuffs, 5s CD (your latest spec)
-        Tornado,          // 5s, 11 targets, 50% magic boost (non-stackable), God controls drift
-        Thunderstorm,     // God staff power (players cannot use)
-        LightningStrike,  // God staff power (players cannot use)
+        if (god != null) NewButton("Play God (owner)", bar, () => { selected = god; RebuildSkillButtons(); });
+        if (goro != null) NewButton("Play Goro (owner)", bar, () => { selected = goro; RebuildSkillButtons(); });
 
-        // Shared / placeholder slots for your future expansion
-        OverhandSmash,    // Goro base attack animation style trigger
-        Uppercut          // Goro MK1-style heavy knock-up (massive knockback only on uppercut)
+        NewButton("Spawn 3 more targets", bar, () => { SpawnExtraTargets(3); });
+        NewButton("Heal Selected", bar, () => {
+            if (selected == null) return;
+            selected.stats.hp = selected.stats.maxHp;
+            AppendLog($"{selected.name} healed.");
+        });
     }
 
-    [Serializable]
-    public class StatBlock
+    // ---------- Skills ----------
+    void RebuildSkillButtons()
     {
-        public float MaxHP = 1000f;
-        public float HP = 1000f;
-        public float Attack = 50f;
-        public float Defense = 20f;
-        public float MoveSpeed = 4.0f;  // world units per sec
-        public float AttackSpeedMult = 1.0f;
+        foreach (Transform t in skillGrid) Destroy(t.gameObject);
+        if (selected == null) return;
 
-        // RPG extras
-        public int Prayer = 100;
-        public int MaxPrayer = 100;
-        public int Rage = 0;       // 0..100 (example)
-        public int MaxRage = 100;
+        // Basic attack(s)
+        NewSkillBtn("Basic Overhand Smash", () => BasicAttack(1.0f));
+        NewSkillBtn("Uppercut (launch)", () => BasicAttack(1.3f, uppercut:true));
 
-        // Elemental multipliers (1 = normal, 1.3 = +30%)
-        public float MagicMult = 1f;
-        public float IceMult = 1f;
-        public float FireMult = 1f;
-        public float LightningMult = 1f;
-
-        public float DamageTakenMult = 1f; // <1 reduces, >1 increases taken
-    }
-
-    public class Buff
-    {
-        public string Name;
-        public float Duration;
-        public Action<Combatant> OnApply;
-        public Action<Combatant> OnExpire;
-        public Action<Combatant, float> OnTick; // (owner, dt)
-        public bool NonStackingKey;             // if true, reapply refreshes time instead of stacking
-        float time;
-
-        public Buff(string name, float duration, Action<Combatant> onApply = null,
-            Action<Combatant> onExpire = null, Action<Combatant, float> onTick = null, bool nonStackingKey = true)
+        // AGS special (if equipped & rage full)
+        if (selected.equippedWeapon != null && selected.equippedWeapon.id == "ags")
         {
-            Name = name;
-            Duration = duration;
-            OnApply = onApply;
-            OnExpire = onExpire;
-            OnTick = onTick;
-            NonStackingKey = nonStackingKey;
+            NewSkillBtn("AGS Special (slam)", () => {
+                if (selected.stats.rage < selected.equippedWeapon.rageCost) { AppendLog("Need full rage for AGS special."); return; }
+                var t = PickTargets(selected, 1);
+                if (t.Count == 0) return;
+                selected.stats.rage = 0f;
+                // +50% acc, +5 damage boost (baked in as mult)
+                C.BasicHit(selected, t[0], selected.equippedWeapon, baseMult: 2.0f);
+                AppendLog("** AGS special! **");
+            });
         }
 
-        public bool Update(Combatant owner, float dt)
+        // Goro skills
+        if (selected.faction == GodsWrathCore.Faction.Goro)
         {
-            time += dt;
-            OnTick?.Invoke(owner, dt);
-            if (time >= Duration)
-            {
-                OnExpire?.Invoke(owner);
-                return true; // finished
-            }
-            return false;
+            var ice = C.skills.FirstOrDefault(s => s.id == "goro_ice_barrage");
+            var shd = C.skills.FirstOrDefault(s => s.id == "goro_shadow_barrage");
+            if (ice != null) NewSkillBtn("Ice Barrage (OSRS)", () => CastSkill(ice));
+            if (shd != null) NewSkillBtn("Shadow Barrage", () => CastSkill(shd));
+        }
+
+        // God skills (owner-only)
+        if (selected.faction == GodsWrathCore.Faction.God && C.IsOwner(selected.accountId))
+        {
+            AddGodButton("God’s Earthquake", GodsWrathCore.GodSkillId.GodsEarthquake);
+            AddGodButton("Tornadoes", GodsWrathCore.GodSkillId.Tornado);
+            AddGodButton("Fire from Heaven", GodsWrathCore.GodSkillId.FireFromHeaven);
+            AddGodButton("Lightning Strike", GodsWrathCore.GodSkillId.LightningStrike);
         }
     }
 
-    public class Combatant : MonoBehaviour
+    void AddGodButton(string label, GodsWrathCore.GodSkillId id)
     {
-        public string DisplayName = "Unit";
-        public Faction Faction = Faction.Enemy;
-        public StatBlock Stats = new StatBlock();
+        var s = C.skills.FirstOrDefault(x => x.id == "god_" + id);
+        if (s != null) NewSkillBtn(label, () => CastSkill(s));
+    }
 
-        // Status flags
-        public bool IsFrozen;
-        public bool IsSleeping;
-
-        // Buffs
-        readonly List<Buff> active = new List<Buff>();
-
-        // Simple hitbox for 2.5D
-        public Vector2 Size = new Vector2(0.8f, 1.8f);
-
-        void Update()
+    void BasicAttack(float mult, bool uppercut=false)
+    {
+        var t = PickTargets(selected, 1);
+        if (t.Count == 0) return;
+        var w = selected.equippedWeapon ?? C.weapons.FirstOrDefault(); // any weapon
+        if (w == null)
         {
-            // Tick buffs
-            for (int i = active.Count - 1; i >= 0; i--)
-                if (active[i].Update(this, Time.deltaTime))
-                    active.RemoveAt(i);
+            // fallback virtual fist
+            w = new GodsWrathCore.Weapon { id="fist", displayName="Fist", baseDamage=100f };
         }
+        C.BasicHit(selected, t[0], w, mult);
+        AppendLog(uppercut ? "Uppercut hit!" : "Overhand smash hit!");
+        // Uppercut heavy knockback is visual; you can add physics here if you use Rigidbodies.
+    }
 
-        public void ApplyBuff(Buff b)
+    void CastSkill(GodsWrathCore.Skill s)
+    {
+        // Find up to s.maxTargets within s.radius (dummy spatial logic)
+        var targets = PickTargets(selected, s.maxTargets);
+        C.TryCastSkill(selected, s, targets);
+        AppendLog($"Cast: {s.displayName} (targets: {targets.Count})");
+    }
+
+    List<GodsWrathCore.Unit> PickTargets(GodsWrathCore.Unit caster, int count)
+    {
+        // For this demo, just pick alive enemies (not same faction) among dummies
+        var list = dummies.Where(u => u.isAlive).ToList();
+        // If God/Goro, consider players/bosses as enemies; for demo we stored them as Boss
+        return list.Take(Mathf.Max(0, count)).ToList();
+    }
+
+    // ---------- Test Targets ----------
+    void SpawnTestTargets()
+    {
+        dummies.Clear();
+        SpawnExtraTargets(5);
+    }
+
+    void SpawnExtraTargets(int n)
+    {
+        for (int i=0;i<n;i++)
         {
-            if (b.NonStackingKey)
-            {
-                // refresh same-name
-                for (int i = 0; i < active.Count; i++)
-                    if (active[i].Name == b.Name)
-                    {
-                        active[i].OnExpire?.Invoke(this);
-                        active.RemoveAt(i);
-                        break;
-                    }
-            }
-            b.OnApply?.Invoke(this);
-            active.Add(b);
-        }
-
-        public void DealDamage(float baseAmount, DamageSchool school, Combatant source = null)
-        {
-            float mult = 1f;
-            switch (school)
-            {
-                case DamageSchool.Ice: mult *= Stats.IceMult; break;
-                case DamageSchool.Fire: mult *= Stats.FireMult; break;
-                default: break;
-            }
-            // Very light defense model (you also have def ignore on some weapons; apply before here)
-            float mitigated = Mathf.Max(1f, baseAmount * mult * Stats.DamageTakenMult - Stats.Defense);
-            Stats.HP -= mitigated;
-            if (Stats.HP <= 0) Die();
-        }
-
-        public void HealPercent(float pct) => Stats.HP = Mathf.Min(Stats.MaxHP, Stats.HP + Stats.MaxHP * pct);
-
-        public void Die()
-        {
-            // TODO: drop logic / vfx
-            Destroy(gameObject);
-        }
-
-        // Utility find targets in radius (2.5D plane)
-        public static List<Combatant> FindTargets(Vector3 center, float radius, Func<Combatant, bool> filter, int cap)
-        {
-            var all = GameObject.FindObjectsOfType<Combatant>();
-            var result = new List<Combatant>();
-            foreach (var c in all)
-            {
-                if (filter != null && !filter(c)) continue;
-                if (Vector3.Distance(c.transform.position, center) <= radius)
-                {
-                    result.Add(c);
-                    if (result.Count >= cap) break;
+            var u = new GodsWrathCore.Unit {
+                name = "Dummy " + (C.units.Count + 1),
+                faction = GodsWrathCore.Faction.Boss, // hostile for demo
+                isPlayerControlled = false,
+                stats = new GodsWrathCore.StatBlock {
+                    level=50, maxLevel=50,
+                    hp=2000, maxHp=2000,
+                    baseMoveSpeed=4f,
+                    armor=50f
                 }
-            }
-            return result;
+            };
+            C.units.Add(u);
+            dummies.Add(u);
         }
+        AppendLog($"+{n} targets spawned.");
     }
 
-    // -----------------------------
-    // 2.5D ARCADE CONTROLLER (simple)
-    // -----------------------------
-    public class PlayerArcadeController : MonoBehaviour
+    // ---------- Small UI helpers ----------
+    Text NewText(string name, Transform parent, int size, TextAnchor align)
     {
-        public Combatant Self;
-        public float Accel = 30f;
-        public float Decel = 30f;
-
-        Vector2 vel;
-
-        void Awake()
-        {
-            if (!Self) Self = GetComponent<Combatant>();
-        }
-
-        void Update()
-        {
-            if (Self == null || Self.IsFrozen || Self.IsSleeping) return;
-
-            // Virtual stick / keys
-            float h = Input.GetAxisRaw("Horizontal");
-            float v = Input.GetAxisRaw("Vertical");
-            var wish = new Vector2(h, v).normalized * Self.Stats.MoveSpeed;
-
-            // Smooth
-            vel = Vector2.MoveTowards(vel, wish, (wish.magnitude > vel.magnitude ? Accel : Decel) * Time.deltaTime);
-            transform.position += new Vector3(vel.x, 0, vel.y) * Time.deltaTime;
-
-            // Face move dir
-            if (vel.sqrMagnitude > 0.001f)
-                transform.forward = new Vector3(vel.x, 0, vel.y);
-
-            // Input to demo skills (map as you like)
-            if (Input.GetKeyDown(KeyCode.Alpha1)) SkillRunner.TryCast(Self, SkillId.IceBarrage);
-            if (Input.GetKeyDown(KeyCode.Alpha2)) SkillRunner.TryCast(Self, SkillId.ShadowBarrage);
-            if (Input.GetKeyDown(KeyCode.Alpha3)) SkillRunner.TryCast(Self, SkillId.FireFromHeaven);
-            if (Input.GetKeyDown(KeyCode.Alpha4)) SkillRunner.TryCast(Self, SkillId.Tornado);
-            if (Input.GetKeyDown(KeyCode.Alpha5)) SkillRunner.TryCast(Self, SkillId.OverhandSmash);
-            if (Input.GetKeyDown(KeyCode.Alpha6)) SkillRunner.TryCast(Self, SkillId.Uppercut);
-        }
+        var go = new GameObject(name, typeof(Text));
+        var t = go.GetComponent<Text>();
+        t.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+        t.fontSize = size;
+        t.alignment = align;
+        t.color = Color.white;
+        t.raycastTarget = false;
+        go.transform.SetParent(parent, false);
+        return t;
     }
 
-    // -----------------------------
-    // SKILL SYSTEM (cooldowns + effects)
-    // -----------------------------
-    public class SkillBook
+    Button NewButton(string label, Transform parent, Action onClick)
     {
-        public Dictionary<SkillId, float> Cooldowns = new();   // time remaining
-        public Dictionary<SkillId, float> BaseCD = new();       // base cooldown
+        var go = new GameObject(label, typeof(Image), typeof(Button));
+        go.transform.SetParent(parent, false);
+        var img = go.GetComponent<Image>();
+        img.color = new Color(0.2f,0.2f,0.2f,0.9f);
+        var rt = go.GetComponent<RectTransform>();
+        rt.sizeDelta = new Vector2(220, 90);
+        rt.anchorMin = new Vector2(0,0.5f);
+        rt.anchorMax = new Vector2(0,0.5f);
 
-        public bool IsOnCD(SkillId id) => Cooldowns.TryGetValue(id, out var t) && t > 0f;
+        var txt = NewText("Text", go.transform, 18, TextAnchor.MiddleCenter);
+        var txtrt = txt.rectTransform; txtrt.anchorMin = Vector2.zero; txtrt.anchorMax = Vector2.one;
+        txtrt.offsetMin = new Vector2(8,8); txtrt.offsetMax = new Vector2(-8,-8);
+        txt.text = label;
 
-        public void SetCD(SkillId id, float sec)
-        {
-            if (!BaseCD.ContainsKey(id)) BaseCD[id] = sec;
-            Cooldowns[id] = sec;
-        }
-
-        public void Tick(float dt)
-        {
-            var keys = new List<SkillId>(Cooldowns.Keys);
-            foreach (var k in keys)
-            {
-                Cooldowns[k] = Mathf.Max(0, Cooldowns[k] - dt);
-            }
-        }
+        var btn = go.GetComponent<Button>();
+        btn.onClick.AddListener(() => onClick?.Invoke());
+        return btn;
     }
 
-    public class SkillRunner : MonoBehaviour
+    void NewSkillBtn(string label, Action onClick)
     {
-        static SkillRunner _inst;
-        public static SkillRunner Instance
-        {
-            get
-            {
-                if (_inst == null)
-                {
-                    var go = new GameObject("SkillRunner");
-                    _inst = go.AddComponent<SkillRunner>();
-                    DontDestroyOnLoad(go);
-                }
-                return _inst;
-            }
-        }
-
-        class SkillHandle
-        {
-            public Combatant Caster;
-            public SkillId Id;
-            public float Elapsed;
-            public float Duration;
-            public Action<float> OnTick;
-        }
-
-        readonly List<SkillHandle> running = new();
-        void Update()
-        {
-            // tick all CDs on active combatants
-            foreach (var c in GameObject.FindObjectsOfType<HasSkills>())
-                c.Book.Tick(Time.deltaTime);
-
-            // tick running effects
-            for (int i = running.Count - 1; i >= 0; i--)
-            {
-                var h = running[i];
-                h.Elapsed += Time.deltaTime;
-                h.OnTick?.Invoke(Time.deltaTime);
-                if (h.Elapsed >= h.Duration) running.RemoveAt(i);
-            }
-        }
-
-        public static bool TryCast(Combatant caster, SkillId id)
-        {
-            var hs = caster.GetComponent<HasSkills>();
-            if (!hs) return false;
-
-            // Player access rules
-            if (!AccessRules.CanUse(caster, id)) return false;
-
-            if (hs.Book.IsOnCD(id)) return false;
-
-            switch (id)
-            {
-                // ---------- GORO ----------
-                case SkillId.IceBarrage: return GoroSkills.Cast_IceBarrage(caster, hs.Book);
-                case SkillId.ShadowBarrage: return GoroSkills.Cast_ShadowBarrage(caster, hs.Book);
-
-                // ---------- GOD ----------
-                case SkillId.FireFromHeaven: return GodSkills.Cast_FireFromHeaven(caster, hs.Book);
-                case SkillId.Tornado: return GodSkills.Cast_Tornado(caster, hs.Book);
-
-                // ---------- Melee anim stubs ----------
-                case SkillId.OverhandSmash: return GoroSkills.Cast_OverhandSmash(caster, hs.Book);
-                case SkillId.Uppercut: return GoroSkills.Cast_Uppercut(caster, hs.Book);
-            }
-            return false;
-        }
-
-        public static void RunTimed(Combatant caster, SkillId id, float duration, Action<float> tick = null)
-        {
-            var h = new SkillHandle { Caster = caster, Id = id, Duration = duration, OnTick = tick };
-            Instance.running.Add(h);
-        }
+        NewButton(label, skillGrid, onClick);
     }
 
-    public class HasSkills : MonoBehaviour
+    void AppendLog(string s)
     {
-        public SkillBook Book = new();
-    }
-
-    // -----------------------------
-    // ACCESS RULES (who may use what)
-    // -----------------------------
-    public static class AccessRules
-    {
-        public static bool CanUse(Combatant c, SkillId id)
+        if (logText == null) return;
+        const int maxChars = 1200;
+        logText.text += s + "\n";
+        if (logText.text.Length > maxChars)
         {
-            // Player restrictions from your specs
-            bool isGoro = c.Faction == Faction.Goro;
-            bool isGod = c.Faction == Faction.God;
-
-            switch (id)
-            {
-                case SkillId.IceBarrage:
-                case SkillId.ShadowBarrage:
-                    return isGoro; // Goro-only spells
-
-                case SkillId.Tornado:
-                case SkillId.Thunderstorm:
-                case SkillId.LightningStrike:
-                case SkillId.FireFromHeaven:
-                    return isGod; // God-only skills (players can’t use Tornado/Lightning/Thunderstorm)
-
-                default:
-                    return true;
-            }
+            logText.text = logText.text.Substring(logText.text.Length - maxChars);
         }
     }
-
-    // -----------------------------
-    // GORO SKILLS
-    // -----------------------------
-    public static class GoroSkills
-    {
-        // Ice Barrage — OSRS-inspired: hard freeze, big AOE, +30% ice & +15% magic during effect window.
-        public static bool Cast_IceBarrage(Combatant c, SkillBook book)
-        {
-            const float radius = 5.5f; // bigger than 3x3; your request to increase radius
-            const float cooldown = 5f; // you set 5s for many skills; Ice Barrage itself had no CD earlier, but we’ll keep 5s to be sane on mobile. Set to 0f if you truly want none.
-
-            if (book.IsOnCD(SkillId.IceBarrage)) return false;
-
-            // Apply temporary damage bonuses to the caster
-            var iceBoost = new Buff("IceBarrage_IceBoost", Balance.IceBarrageFreezeSec,
-                onApply: t => { t.Stats.IceMult *= (1f + Balance.IceBarrage_IceDamageBoost); t.Stats.MagicMult *= (1f + Balance.IceBarrage_MagicBoost); },
-                onExpire: t => { t.Stats.IceMult /= (1f + Balance.IceBarrage_IceDamageBoost); t.Stats.MagicMult /= (1f + Balance.IceBarrage_MagicBoost); });
-            c.ApplyBuff(iceBoost);
-
-            // Find and freeze targets
-            var targets = Combatant.FindTargets(c.transform.position, radius,
-                t => t != c && t.Faction != c.Faction, Balance.MaxTargetsIceBarrage);
-
-            foreach (var t in targets)
-            {
-                // Freeze
-                t.IsFrozen = true;
-                t.ApplyBuff(new Buff("Frozen", Balance.IceBarrageFreezeSec,
-                    onExpire: u => u.IsFrozen = false));
-
-                // Placeholder SFX/VFX
-                VFX.PlayIceBarrage(t
+}
