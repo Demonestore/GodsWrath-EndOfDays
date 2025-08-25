@@ -1,0 +1,29 @@
+// File: Assets/_Game/Scripts/GodsWrath_Core.cs
+// Single-file core for "Gods Wrath" — drop in & compile.
+// Minimal, self-contained stubs + systems so the project compiles without extra files.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+
+#region ===== CORE CONFIG & TYPES =====
+namespace GW
+{
+  public static class GameConfig
+  {
+    // Set these to your account ID(s) so you get Goro/God privileges
+    public const string GoroAccountId = "YOUR_GORO_ACCOUNT_ID";
+    public const string GodAccountId  = "YOUR_GOD_ACCOUNT_ID";
+
+    // Global caps
+    public const int MaxLevel = 99;
+
+    // Cooldowns & durations (players)
+    public const float PlayerVengeanceCooldown = 15f; // Goro ignores cooldown
+    public const float GodSpellDefaultCooldown = 6f;  // when staff is full 30/30
+    public const float GodEarthquakeCooldown   = 15f; // you can set to 0 if you truly want none
+
+    // Goro passives / rules
+    public const float GoroMoveSpeedBonus = 0.50f;              // +50% permanent
+    public
