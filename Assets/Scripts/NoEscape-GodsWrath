@@ -1,0 +1,260 @@
+// File: Assets/Scripts/GodsWrathBootstrap.cs
+// Full merged version with Goro unique skills, Barrows sets, spellbooks, and items
+
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace GodsWrath
+{
+    #region Core Types
+
+    public enum Faction { Player, Boss, Neutral }
+    public enum DamageType { Melee, Magic, Ranged, Fire, Ice, Shadow, Holy, Lightning, Water, Poison }
+    public enum School { Normal, Ancient, Lunar, God }
+    public enum Slot { Head, Body, Legs, Feet, Hands, Cape, Amulet, Ring, Weapon, Shield, Gloves, Boots }
+    public enum WeaponKind { None, Rapier, Longsword, Maul, Staff, Bow, Crossbow, Whip, Mace, Spear, Axe }
+    public enum Rarity { Common, Uncommon, Rare, Epic, Legendary, Mythic, Divine }
+    public enum TickSpeed { T2 = 2, T3 = 3, T4 = 4, T5 = 5, T6 = 6 }
+
+    [Serializable]
+    public class StatBlock
+    {
+        public int atkMelee, atkMagic, atkRange;
+        public int defStab, defSlash, defCrush, defMagic, defRange;
+        public int strBonus, rngStrBonus, magDmgPercent;
+    }
+
+    [Serializable]
+    public class Item
+    {
+        public string id;
+        public string displayName;
+        public Rarity rarity;
+        public Slot slot;
+        public WeaponKind weaponKind;
+        public StatBlock stats = new();
+        public bool tradeable = true;
+        public bool degrades = false;
+        public bool accountLocked = false;
+        public string notes;
+    }
+
+    [Serializable]
+    public class Skill
+    {
+        public string id;
+        public string displayName;
+        public Faction ownerRestriction = Faction.Player;
+        public bool goroOnly = false;
+        public bool godOnly = false;
+        public School school = School.Normal;
+        public DamageType damageType = DamageType.Magic;
+
+        public float baseDamagePercent = 0f;
+        public int flatBonus = 0;
+        public int maxTargets = 1;
+        public float radius = 2f;
+        public float freezeSeconds = 0f;
+        public float stunSeconds = 0f;
+        public float slowMovePercent = 0f;
+        public float slowHandsPercent = 0f;
+        public float dotPercentPerSecond = 0f;
+        public float durationSeconds = 0f;
+        public float cooldownSeconds = 0f;
+        public bool noCooldownForGoro = false;
+        public bool noCooldownForGod = false;
+
+        public bool reducesPrayer = false;
+        public int prayerDelta = 0;
+        public float prayerDuration = 0f;
+        public bool ignoresDefense = false;
+        public float ignoreDefensePlayers = 0f;
+        public float ignoreDefenseBosses = 0f;
+        public float casterMagicBoostPercent = 0f;
+        public float enemyDamageTakenStack = 0f;
+        public int stacksMax = 0;
+        public string description;
+    }
+
+    [Serializable]
+    public class Drop
+    {
+        public string itemId;
+        public float chancePercent;
+        public bool uniqueAccountLock = false;
+        public string notes;
+    }
+
+    [Serializable]
+    public class BossDefinition
+    {
+        public string id;
+        public string displayName;
+        public int level;
+        public List<Skill> skillSet = new();
+        public List<Drop> drops = new();
+        public bool isPlayable = false;
+    }
+
+    [Serializable]
+    public class PetDefinition
+    {
+        public string id;
+        public string displayName;
+        public int level;
+        public Faction faction = Faction.Player;
+        public bool goroOnly = false;
+        public string spritePath;
+        public string notes;
+    }
+
+    [Serializable]
+    public class Spellbook
+    {
+        public string id;
+        public string displayName;
+        public School school;
+        public List<string> skillIds = new();
+    }
+
+    #endregion
+
+    #region GameDB
+
+    public static class GameDB
+    {
+        public static readonly float TICK_SECONDS = 0.6f;
+        public static readonly string OwnerAccountId = "YOUR_ACCOUNT_LOCK_ID";
+
+        public static readonly Dictionary<string, Item> Items = new();
+        public static readonly Dictionary<string, Skill> Skills = new();
+        public static readonly Dictionary<string, BossDefinition> Bosses = new();
+        public static readonly Dictionary<string, PetDefinition> Pets = new();
+        public static readonly Dictionary<string, Spellbook> Spellbooks = new();
+
+        public static void Init()
+        {
+            Items.Clear(); Skills.Clear(); Bosses.Clear(); Pets.Clear(); Spellbooks.Clear();
+            DefineEquipment();
+            DefineSkills();
+            DefineBosses();
+            DefinePets();
+            DefineSpellbooks();
+        }
+
+        #region Equipment
+
+        static void DefineEquipment()
+        {
+            // --- Chaotic Goro-only weapons ---
+            Items["chaotic_rapier"] = new Item{ id="chaotic_rapier", displayName="Chaotic Rapier", rarity=Rarity.Mythic, slot=Slot.Weapon, weaponKind=WeaponKind.Rapier, stats=new StatBlock{ atkMelee=150, strBonus=100 }, tradeable=true, accountLocked=true, notes="Goro-only; 2-tick stab; ignores 50% player DEF, 30% boss DEF." };
+            Items["chaotic_staff"] = new Item{ id="chaotic_staff", displayName="Chaotic Staff", rarity=Rarity.Mythic, slot=Slot.Weapon, weaponKind=WeaponKind.Staff, stats=new StatBlock{ atkMagic=120, magDmgPercent=15 }, tradeable=true, accountLocked=true, notes="Goro-only; also 2-tick melee bonk." };
+
+            // --- Barrows Arcane Sets ---
+            Items["barrows_arcane_mage_head"] = ArmorPiece("Barrows Arcane Circlet (Mage)", Slot.Head, 0,30,0, 12,6,6, 0,0,15);
+            Items["barrows_arcane_mage_body"] = ArmorPiece("Barrows Arcane Robe (Mage)", Slot.Body, 0,40,0, 15,7,7, 0,0,20);
+            Items["barrows_arcane_mage_legs"] = ArmorPiece("Barrows Arcane Skirt (Mage)", Slot.Legs, 0,35,0, 12,6,6, 0,0,15);
+            Items["barrows_arcane_range_head"] = ArmorPiece("Barrows Arcane Visor (Range)", Slot.Head, 0,0,30, 10,10,10, 0,0,0);
+            Items["barrows_arcane_range_body"] = ArmorPiece("Barrows Arcane Cuirass (Range)", Slot.Body, 0,0,40, 12,12,12, 0,0,0);
+            Items["barrows_arcane_melee_head"] = ArmorPiece("Barrows Arcane Helm (Melee)", Slot.Head, 20,0,0, 15,15,15, 10,0,0);
+            Items["barrows_arcane_melee_body"] = ArmorPiece("Barrows Arcane Plate (Melee)", Slot.Body, 25,0,0, 20,20,20, 12,0,0);
+        }
+
+        static Item ArmorPiece(string name, Slot slot, int aMelee, int aMagic, int aRange,
+                               int dStab, int dSlash, int dCrush, int str, int rngStr, int magPct)
+        {
+            return new Item {
+                id=name.ToLower().Replace(" ","_"),
+                displayName=name,
+                rarity=Rarity.Mythic,
+                slot=slot,
+                stats=new StatBlock{ atkMelee=aMelee, atkMagic=aMagic, atkRange=aRange, defStab=dStab, defSlash=dSlash, defCrush=dCrush, strBonus=str, rngStrBonus=rngStr, magDmgPercent=magPct },
+                tradeable=true
+            };
+        }
+
+        #endregion
+
+        #region Skills
+
+        static void DefineSkills()
+        {
+            // --- Goro Melee ---
+            Skills["goro_uppercut"] = new Skill{ id="goro_uppercut", displayName="Uppercut", goroOnly=true, ownerRestriction=Faction.Player, school=School.Normal, damageType=DamageType.Melee, flatBonus=50, cooldownSeconds=0, stunSeconds=0.2f, description="MK1-style launch + screen shake" };
+            Skills["goro_grab_pound"] = new Skill{ id="goro_grab_pound", displayName="Grab & Pound", goroOnly=true, ownerRestriction=Faction.Player, school=School.Normal, damageType=DamageType.Melee, flatBonus=5, cooldownSeconds=0, description="Grabs target, 8 rapid chest strikes" };
+            Skills["goro_spinning_fist"] = new Skill{ id="goro_spinning_fist", displayName="Spinning Fist", goroOnly=true, ownerRestriction=Faction.Player, school=School.Normal, damageType=DamageType.Melee, flatBonus=25, cooldownSeconds=0, description="Short dash + spin punch" };
+            Skills["goro_head_stomp"] = new Skill{ id="goro_head_stomp", displayName="Head Stomp", goroOnly=true, ownerRestriction=Faction.Player, school=School.Normal, damageType=DamageType.Melee, flatBonus=33, cooldownSeconds=0, description="Leap onto head then stomp" };
+
+            // --- Goro Ancient Spells ---
+            Skills["goro_ice_barrage"] = new Skill{
+                id="goro_ice_barrage", displayName="Ice Barrage", goroOnly=true, ownerRestriction=Faction.Player,
+                school=School.Ancient, damageType=DamageType.Ice,
+                baseDamagePercent=15f,
+                ignoreDefensePlayers=0.15f,
+                maxTargets=11, radius=6f, freezeSeconds=15f,
+                cooldownSeconds=0, noCooldownForGoro=true,
+                description="OSRS-style full ice block animation; 15% extra magic damage; ignores 15% player DEF."
+            };
+            Skills["goro_shadow_barrage"] = new Skill{
+                id="goro_shadow_barrage", displayName="Shadow Barrage", goroOnly=true, ownerRestriction=Faction.Player,
+                school=School.Ancient, damageType=DamageType.Shadow,
+                maxTargets=11, radius=6f, casterMagicBoostPercent=30, cooldownSeconds=0,
+                noCooldownForGoro=true, description="Shadow projectiles, multiple targets, OSRS-style."
+            };
+            Skills["goro_vengeance"] = new Skill{
+                id="goro_vengeance", displayName="Vengeance", goroOnly=true, ownerRestriction=Faction.Player,
+                school=School.Lunar, damageType=DamageType.Magic,
+                maxTargets=1, casterMagicBoostPercent=15, cooldownSeconds=0, noCooldownForGoro=true,
+                description="Reflects damage; unique lightning effect on skull."
+            };
+
+            // --- Player Normal Spells ---
+            Skills["snow_balls"] = new Skill{
+                id="snow_balls", displayName="Snow Balls", ownerRestriction=Faction.Player,
+                school=School.Normal, damageType=DamageType.Ice,
+                maxTargets=6, radius=5f, freezeSeconds=8f, slowMovePercent=15f, slowHandsPercent=10f,
+                baseDamagePercent=50f, stacksMax=15, durationSeconds=15f,
+                description="Massive rolling OSRS-style snowballs; stackable frostbite damage; 94 Mage."
+            };
+            Skills["stackable_venom"] = new Skill{
+                id="stackable_venom", displayName="Stackable Venom", ownerRestriction=Faction.Player,
+                school=School.Normal, damageType=DamageType.Poison,
+                maxTargets=2, stacksMax=15, durationSeconds=3f, cooldownSeconds=10f,
+                description="Adds 1 poison stack every 10s; max 15; strongest poison damage; 94 Mage."
+            };
+        }
+
+        #endregion
+
+        #region Bosses
+
+        static void DefineBosses()
+        {
+            Bosses["goro"] = new BossDefinition{
+                id="goro", displayName="Goro", level=45, isPlayable=true,
+                skillSet=new List<Skill>{
+                    Skills["goro_uppercut"], Skills["goro_grab_pound"], Skills["goro_spinning_fist"],
+                    Skills["goro_head_stomp"], Skills["goro_ice_barrage"], Skills["goro_shadow_barrage"],
+                    Skills["goro_vengeance"]
+                },
+                drops=new List<Drop>()
+            };
+        }
+
+        #endregion
+
+        #region Pets
+
+        static void DefinePets()
+        {
+            Pets["pet_graardor"] = new PetDefinition{ id="pet_graardor", displayName="General Graardor", level=624, goroOnly=true };
+        }
+
+        #endregion
+
+        #region Spellbooks
+
+        static void DefineSpellbooks()
+        {
+            Spellbooks["ancient_goro"] = new Spellbook{
